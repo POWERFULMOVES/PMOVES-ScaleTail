@@ -4,12 +4,12 @@ configs:
       {"TCP":{"443":{"HTTPS":true}},
       "Web":{"$${TS_CERT_DOMAIN}:443":
           {"Handlers":{"/":
-          {"Proxy":"http://127.0.0.1:8080"}}}},
+          {"Proxy":"http://127.0.0.1:8001"}}}},
       "AllowFunnel":{"$${TS_CERT_DOMAIN}:443":false}}
 
 services:
 # Make sure you have updated/checked the .env file with the correct variables.
-# All the ${ xx } need to be defined there.
+# Every variable used in this file must be defined there, unless it has a default such as ${VAR:-value}.
   # Tailscale Sidecar Configuration
   tailscale:
     image: tailscale/tailscale:latest # Image to be used
@@ -22,7 +22,7 @@ services:
       - TS_USERSPACE=false
       - TS_ENABLE_HEALTH_CHECK=true              # Enable healthcheck endpoint: "/healthz"
       - TS_LOCAL_ADDR_PORT=127.0.0.1:41234       # The <addr>:<port> for the healthz endpoint
-      #- TS_ACCEPT_DNS=true # Uncomment when using MagicDNS
+      #- TS_ACCEPT_DNS=true # Uncomment only if the service must resolve MagicDNS names - this replaces Docker DNS, so Compose service names no longer resolve
       - TS_AUTH_ONCE=true
     configs:
       - source: ts-serve
@@ -35,10 +35,10 @@ services:
     cap_add:
       - net_admin # Tailscale requirement
     #ports:
-    #  - 0.0.0.0:${SERVICEPORT}:${SERVICEPORT} # Binding port ${SERVICE}PORT to the local network - may be removed if only exposure to your Tailnet is required
+    #  - 0.0.0.0:${SERVICEPORT}:${SERVICEPORT} # Binding the service port to the local network - may be removed if only exposure to your Tailnet is required
     # If any DNS issues arise, use your preferred DNS provider by uncommenting the config below
-    # dns:
-    #   - ${DNS_SERVER}
+    #dns:
+    #  - ${DNS_SERVER}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:41234/healthz"] # Check Tailscale has a Tailnet IP and is operational
       interval: 1m # How often to perform the check
@@ -47,40 +47,27 @@ services:
       start_period: 10s # Time to wait before starting health checks
     restart: always
 
-# ${SERVICE}
+  # Application
   application:
     image: ${IMAGE_URL} # Image to be used
-    network_mode: service:tailscale # Sidecar configuration to route ${SERVICE} through Tailscale
+    network_mode: service:tailscale # Sidecar configuration to route the service through Tailscale
     container_name: app-${SERVICE} # Name for local container management
+    environment: # Variables are declared in .env file.
+      - PUID=${PUID} # The image runs the server as this user and group, and sets the owner of /data to them
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - STORYTELLER_SECRET_KEY=${STORYTELLER_SECRET_KEY:?Set STORYTELLER_SECRET_KEY in .env}
+    # Do not set "user:" on this service: the image refuses to start and wants PUID and PGID instead.
+    volumes:
+      - ./${SERVICE}-data/data:/data
     depends_on:
       tailscale:
         condition: service_healthy
-      db:
-        condition: service_started
-    environment: # Varibles are delared in .env file.
-      - XWIKI_VERSION=${XWIKI_VERSION}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_DATABASE=${DB_DATABASE}
-      - DB_HOST=db-${SERVICE}
-    volumes:
-      - ./${SERVICE}-data/xwiki:/usr/local/xwiki
-    restart: always
-  db:
-    image: "mariadb:12"
-    container_name: db-${SERVICE}
-    volumes:
-      - ./${SERVICE}-data/mariadb:/var/lib/mysql
-      - type: bind
-        source: ./init.sql
-        target: /docker-entrypoint-initdb.d/init.sql
-    environment:
-      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
-      - MARIADB_USER=${DB_USER}
-      - MARIADB_PASSWORD=${DB_PASSWORD}
-      - MARIADB_DATABASE=${DB_DATABASE}
-    command:
-      - "--character-set-server=utf8mb4"
-      - "--collation-server=utf8mb4_bin"
-      - "--explicit-defaults-for-timestamp=1"
+    # Healthcheck: the image defines no HEALTHCHECK, so call the web interface with wget, which the image ships.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8001/"] # Check if the service is responding
+      interval: 1m # How often to perform the check
+      timeout: 10s # Time to wait for the check to succeed
+      retries: 3 # Number of retries before marking as unhealthy
+      start_period: 60s # Time to wait before starting health checks - the first start runs a database migration
     restart: always
